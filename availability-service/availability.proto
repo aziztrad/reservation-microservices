@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+service Availability {
+  rpc CheckRoom (RoomRequest) returns (RoomResponse);
+}
+
+message RoomRequest {
+  string roomId = 1;
+  string date = 2;
+}
+
+message RoomResponse {
+  bool available = 1;
+}
