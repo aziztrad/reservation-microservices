@@ -2,11 +2,26 @@ const express = require("express");
 const grpc = require("@grpc/grpc-js");
 const protoLoader = require("@grpc/proto-loader");
 const { producer } = require("../notifications-service/kafka");
+const sqlite = require("sqlite3").verbose();
 const app = express();
 app.use(express.json());
 
-// Fake database
-let reservations = [];
+// Configuration de la base de données SQLite
+const db = new sqlite.Database("./reservations.db", (err) => {
+  if (err) {
+    console.error("Erreur DB:", err.message);
+  } else {
+    console.log("✅ Connecté à la base SQLite");
+    db.run(`
+      CREATE TABLE IF NOT EXISTS reservations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room TEXT NOT NULL,
+        user TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
+});
 
 // Configuration gRPC
 const packageDefinition = protoLoader.loadSync(
@@ -22,7 +37,6 @@ const grpcClient = new availabilityProto.Availability(
 // Cache de connexion Kafka
 let isKafkaConnected = false;
 
-// Middleware de connexion Kafka
 const connectKafka = async () => {
   if (!isKafkaConnected) {
     try {
@@ -47,50 +61,49 @@ app.post("/reservations", async (req, res) => {
   try {
     // 1. Vérification disponibilité
     const isAvailable = await new Promise((resolve) => {
-      grpcClient.CheckRoom(
-        { roomId: room, date: new Date().toISOString().split("T")[0] },
-        (err, response) => {
-          resolve(err ? false : response?.available);
-        }
-      );
+      grpcClient.CheckRoom({ roomId: room }, (err, response) => {
+        resolve(err ? false : response?.available);
+      });
     });
 
     if (!isAvailable) {
       return res.status(409).json({ error: "Room not available" });
     }
 
-    // 2. Création réservation
-    const newReservation = {
-      id: reservations.length + 1,
-      room,
-      user,
-      createdAt: new Date().toISOString(),
-    };
-    reservations.push(newReservation);
+    // 2. Création réservation dans SQLite
+    const newReservation = await new Promise((resolve, reject) => {
+      db.run(
+        "INSERT INTO reservations (room, user) VALUES (?, ?)",
+        [room, user],
+        function (err) {
+          if (err) return reject(err);
+          resolve({
+            id: this.lastID,
+            room,
+            user,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      );
+    });
 
-    // 3. Notification Kafka (avec gestion d'erreur isolée)
+    // 3. Notification Kafka
     try {
       await connectKafka();
-
       await producer.send({
         topic: "reservation-events",
         messages: [
           {
-            key: room, // Permet le partitionnement par salle
             value: JSON.stringify({
               type: "RESERVATION_CREATED",
               data: newReservation,
-              metadata: {
-                service: "reservation-service",
-                version: "1.0",
-              },
+              metadata: { service: "reservation-service" },
             }),
           },
         ],
       });
     } catch (kafkaError) {
       console.error("Erreur Kafka (non bloquante):", kafkaError);
-      // On continue même si Kafka échoue
     }
 
     res.status(201).json(newReservation);
@@ -102,19 +115,24 @@ app.post("/reservations", async (req, res) => {
 
 // GET /reservations
 app.get("/reservations", (req, res) => {
-  res.json(reservations);
+  db.all("SELECT * FROM reservations", [], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows);
+  });
 });
 
-// Gestion propre de la fermeture
+// Gestion de la fermeture
 process.on("SIGINT", async () => {
   if (isKafkaConnected) {
     await producer.disconnect();
     console.log("Producteur Kafka déconnecté");
   }
+  db.close();
   process.exit();
 });
 
-// Démarrer le serveur
 const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`REST Service running on http://localhost:${PORT}`);
