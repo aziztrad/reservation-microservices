@@ -7,6 +7,8 @@ graph LR
   API_Gateway-->|gRPC|Service_Disponibilité
   API_Gateway-->|REST|Service_Réservations
   API_Gateway-->|Kafka|Notifications
+  Service_Disponibilité-->|Stockage|MongoDB[(MongoDB)]
+  Service_Réservations-->|Stockage|SQLite[(SQLite)]
 ```
 ## 🛠 Stack Technologique
 | Composant | Technologies | Port |
