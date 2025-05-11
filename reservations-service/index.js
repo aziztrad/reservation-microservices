@@ -123,6 +123,74 @@ app.get("/reservations", (req, res) => {
   });
 });
 
+// GET /reservations/:id - Récupération d'une réservation par ID
+app.get("/reservations/:id", (req, res) => {
+  const id = req.params.id;
+  db.get("SELECT * FROM reservations WHERE id = ?", [id], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ error: "Reservation not found" });
+    }
+    res.json(row);
+  });
+});
+
+// DELETE /reservations/:id - Suppression d'une réservation
+app.delete("/reservations/:id", async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    // 1. Vérifier si la réservation existe
+    const reservation = await new Promise((resolve, reject) => {
+      db.get("SELECT * FROM reservations WHERE id = ?", [id], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!reservation) {
+      return res.status(404).json({ error: "Reservation not found" });
+    }
+
+    // 2. Supprimer la réservation
+    await new Promise((resolve, reject) => {
+      db.run("DELETE FROM reservations WHERE id = ?", [id], function (err) {
+        if (err) return reject(err);
+        resolve({ changes: this.changes });
+      });
+    });
+
+    // 3. Notifier via Kafka
+    try {
+      await connectKafka();
+      await producer.send({
+        topic: "reservation-events",
+        messages: [
+          {
+            value: JSON.stringify({
+              type: "RESERVATION_DELETED",
+              data: { id: parseInt(id), ...reservation },
+              metadata: { service: "reservation-service" },
+            }),
+          },
+        ],
+      });
+    } catch (kafkaError) {
+      console.error("Erreur Kafka (non bloquante):", kafkaError);
+    }
+
+    res.status(200).json({
+      message: "Reservation deleted successfully",
+      id: parseInt(id),
+    });
+  } catch (err) {
+    console.error("Erreur lors de la suppression:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Gestion de la fermeture
 process.on("SIGINT", async () => {
   if (isKafkaConnected) {

@@ -63,10 +63,13 @@ const typeDefs = gql`
 
   type Query {
     reservations: [Reservation]
+    reservationsByUser(user: String!): [Reservation]
+    reservation(id: ID!): Reservation
   }
 
   type Mutation {
     createReservation(room: String!, user: String!): Reservation
+    deleteReservation(id: ID!): Boolean
   }
 `;
 
@@ -75,6 +78,21 @@ const resolvers = {
     reservations: async () => {
       const response = await axios.get(`${REST_API_URL}/reservations`);
       return response.data;
+    },
+    reservationsByUser: async (_, { user }) => {
+      const response = await axios.get(`${REST_API_URL}/reservations`);
+      return response.data.filter((r) => r.user === user);
+    },
+    reservation: async (_, { id }) => {
+      try {
+        const response = await axios.get(`${REST_API_URL}/reservations/${id}`);
+        return response.data;
+      } catch (error) {
+        if (error.response && error.response.status === 404) {
+          return null; // Return null if reservation not found
+        }
+        throw new Error(error.message || "Failed to fetch reservation");
+      }
     },
   },
   Mutation: {
@@ -126,6 +144,52 @@ const resolvers = {
       } catch (err) {
         console.error("Erreur création réservation:", err);
         throw new Error(err.message || "Internal server error");
+      }
+    },
+    deleteReservation: async (_, { id }) => {
+      try {
+        // Get all reservations and find the one we want to delete
+        let reservationData = null;
+        try {
+          const allReservations = await axios.get(`${REST_API_URL}/reservations`);
+          reservationData = allReservations.data.find(r => r.id == id);
+          
+          if (!reservationData) {
+            console.warn(`Reservation with ID ${id} not found before deletion`);
+          }
+        } catch (getError) {
+          console.error("Error fetching reservation before deletion:", getError);
+          // Continue with deletion even if we couldn't get the reservation data
+        }
+
+        // Suppression de la réservation
+        const deleteResponse = await axios.delete(`${REST_API_URL}/reservations/${id}`);
+
+        // Notification Kafka - only if we have reservation data or the delete was successful
+        if (reservationData || deleteResponse.status === 200) {
+          try {
+            await connectKafka();
+            await producer.send({
+              topic: "reservation-events",
+              messages: [
+                {
+                  value: JSON.stringify({
+                    type: "RESERVATION_DELETED",
+                    data: reservationData || { id: parseInt(id) },
+                    timestamp: new Date().toISOString(),
+                  }),
+                },
+              ],
+            });
+          } catch (kafkaError) {
+            console.error("Erreur Kafka (non bloquante):", kafkaError);
+          }
+        }
+
+        return deleteResponse.status === 200;
+      } catch (error) {
+        console.error("Failed to delete reservation:", error);
+        return false;
       }
     },
   },
